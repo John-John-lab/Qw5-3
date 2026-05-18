@@ -4429,6 +4429,7 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
         # 🔧 FIX: Always calculate signal stats when NOT page-only navigation
         print(f"[DEBUG] 🎯 CALCULATING SIGNAL STATS: triggered={triggered_id}, is_page_nav={is_page_only_nav}")
         t_stats_start = time.time()
+        stats_elapsed = 0.0
     else:
         # ✅ BASIC STATS: Calculate only when data changes (not on page nav)
         total_tasks = len(tasks)
