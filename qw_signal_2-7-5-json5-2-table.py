@@ -285,6 +285,11 @@ current_tasks = []  # Master dataset in RAM for atomic swaps
 page_html_cache = {}  # Cache for rendered page HTML: {page_num: html.Div}
 last_rendered_stats = {} # Cache for summary tables to prevent disappearance
 
+# Global stats cache for ALL tasks (calculated once per data version)
+cached_signal_stats_html = None  # Full Signal Performance Summary table
+cached_small_stats_data = None   # Small summary stats dict
+stats_cache_version = -1         # Version of data these stats belong to
+
 # ---------- Low-RAM Parquet Cache ----------
 @functools.lru_cache(maxsize=4)  # Holds max 4 DFs to protect old Mac RAM
 def _load_parquet_cached(file_path: str, mtime: float) -> pd.DataFrame:
@@ -4007,7 +4012,7 @@ _cached_golden_version = None
 )
 def update_task_table_only(current_page, version, lock_state, analysis_trigger):
     """Render task table ONLY. Uses aggressive caching to skip HTML generation on page changes."""
-    global golden_task_store_data, golden_store_version, _page_html_cache, _cached_golden_version
+    global golden_task_store_data, golden_store_version, _page_html_cache, _cached_golden_version, cached_signal_stats_html, cached_small_stats_data, stats_cache_version
     
     # Initialize timer for full trace
     timer = PerfTimer(f"Page {current_page} Render (v{version})").start()
@@ -4426,24 +4431,27 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
         ]
         stats_table = html.Table([html.Tbody(stats_rows)], style={"border": "1px solid #ccc", "padding": "5px", "fontSize": "13px", "backgroundColor": "#f9f9f9"})
         
-        # 🔧 FIX: Placeholder for signal stats during page navigation
-        print(f"[DEBUG] ⏭️ SKIPPING SIGNAL STATS (page navigation): triggered={triggered_id}")
-        signal_stats_table = html.Div("ℹ️ Detailed signal stats shown after data load/recalculation", 
-                                       style={"textAlign": "center", "padding": "10px", "color": "#555", "fontStyle": "italic"})
+        # 🔧 FIX: Use cached signal stats from ALL tasks (calculated once per version)
+        print(f"[DEBUG] ⏭️ USING CACHED SIGNAL STATS")
         stats_elapsed = 0.0
+        # Access global cache (already declared at function level)\n        signal_stats_table = cached_signal_stats_html if cached_signal_stats_html else html.Div("ℹ️ Stats loading...", style={"textAlign": "center", "padding": "10px", "color": "#555", "fontStyle": "italic"})
     else:
-        # 🔧 CRITICAL: Calculate signal stats on ALL tasks when data loads
+        # 🔧 CRITICAL: Calculate signal stats on ALL tasks when data loads/recalculates
         print(f"[DEBUG] 🚀 CALCULATING SIGNAL STATS for {len(tasks)} tasks...")
-        t_stats_start = time.time()
         
+        # Declare global variables BEFORE using them
+        global cached_signal_stats_html, cached_small_stats_data, stats_cache_version
+        
+        t_stats_start = time.time()
+
         # ✅ BASIC STATS: Calculate only when data changes (not on page nav) - NOW USES ALL TASKS
         total_tasks = len(tasks)
         completed_count = sum(1 for t in tasks if t.status == "completed")
-        
+
         # ALL-task averages (consistent across all pages)
         avg_adv = np.mean([t.max_adverse_move_pct for t in tasks if t.max_adverse_move_pct is not None and not pd.isna(t.max_adverse_move_pct)] or [0])
         avg_dd = np.mean([t.drawdown_before_level for t in tasks if t.drawdown_before_level is not None and not pd.isna(t.drawdown_before_level)] or [0])
-        
+
         stats_rows = [
             html.Tr([html.Td("✅ Task Completed (Total)"), html.Td(str(completed_count))]),
             html.Tr([html.Td("📦 Total Tasks"), html.Td(str(total_tasks))]),
@@ -4451,7 +4459,7 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
             html.Tr([html.Td("📉 Avg Drawdown Lvl (All)"), html.Td(fmt_dd(avg_dd))])
         ]
         stats_table = html.Table([html.Tbody(stats_rows)], style={"border": "1px solid #ccc", "padding": "5px", "fontSize": "13px", "backgroundColor": "#f9f9f9"})
-        
+
         # ✅ SIGNAL STATS: Calculated on ALL in-memory tasks (consistent denominator)
         reached_level_cnt = sum(1 for t in tasks if t.reached_level)
         reversed_dir_cnt = sum(1 for t in tasks if t.reversed_direction)
@@ -4597,8 +4605,15 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
             html.Tr([html.Td("Delta Price 4%+ Total", style=td_style), html.Td(str(delta_4_plus_total), style=td_style)]),
         ]
         signal_stats_table = html.Table([html.Tbody(signal_stats_rows)], style={"border": "1px solid #4a90e2", "padding": "5px", "marginTop": "10px", "backgroundColor": "#f0f7ff"})
+        
+        # Cache the stats for ALL tasks (calculated once per version)
+        global cached_signal_stats_html, cached_small_stats_data, stats_cache_version
+        cached_signal_stats_html = signal_stats_table
+        cached_small_stats_data = {"completed": completed_count, "total": total_tasks, "avg_adv": avg_adv, "avg_dd": avg_dd}
+        stats_cache_version = golden_store_version
+        
         stats_elapsed = time.time() - t_stats_start
-        print(f"[DEBUG] ✅ SIGNAL STATS COMPLETE in {stats_elapsed:.2f}s")
+        print(f"[DEBUG] ✅ SIGNAL STATS COMPLETE in {stats_elapsed:.2f}s (cached for version {stats_cache_version})")
     
     # 🔧 PAGINATION NAVIGATION
     nav_buttons = []
