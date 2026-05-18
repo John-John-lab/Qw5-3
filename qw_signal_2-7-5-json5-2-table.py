@@ -2552,7 +2552,10 @@ th {
 let hiddenColumns = new Set();
 // Function to apply hidden column classes to the current table
 function applyHiddenColumns() {
-    const table = document.querySelector('#task-summary table');
+    // 🔧 FIXED: Changed selector from #task-summary to #task-table-container
+    const container = document.querySelector('#task-table-container');
+    if (!container) return;
+    const table = container.querySelector('table');
     if (!table) return;
     hiddenColumns.forEach(colIndex => {
         const columnCells = table.querySelectorAll(`tr th:nth-child(${colIndex+1}), tr td:nth-child(${colIndex+1})`);
@@ -4041,6 +4044,9 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
     t3 = time.time()
     rows = []
     
+    # 🔧 DEBUG: Log if we're about to generate rows (should only happen on cache miss)
+    print(f"[DEBUG] Starting row generation for {len(visible_tasks)} tasks... This should ONLY happen on first visit to a page!")
+    
     # Pre-calculate helper functions ONCE - OPTIMIZED with native datetime
     from datetime import datetime, timezone
     
@@ -4105,14 +4111,19 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
     prev_golden_version = getattr(update_task_table_only, '_last_golden_version', None)
     is_page_only_nav = (triggered_id == "task-page-store") and (prev_golden_version is not None) and (current_golden_version == prev_golden_version)
     
+    # 🔧 DEBUG: Log navigation detection
+    print(f"[DEBUG] triggered_id={triggered_id}, prev_ver={prev_golden_version}, curr_ver={current_golden_version}, is_page_only_nav={is_page_only_nav}")
+    
     # Store current state for next comparison
     update_task_table_only._last_golden_version = current_golden_version
     update_task_table_only._last_page = current_page
     
     # ⚡ CRITICAL CACHE CHECK #2 - Return cached page AFTER pagination calc but BEFORE row generation
     if current_page in _page_html_cache:
-        print(f"[PERF] CACHE HIT #2! Returning cached page in {time.time() - t_start:.4f}s")
+        print(f"[PERF] CACHE HIT #2! Returning cached page {current_page} in {time.time() - t_start:.4f}s")
         return _page_html_cache[current_page]
+    else:
+        print(f"[DEBUG] CACHE MISS for page {current_page}. Will generate {len(visible_tasks)} rows. Cache has pages: {list(_page_html_cache.keys())}")
     
     rows = []
     
