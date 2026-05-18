@@ -4429,7 +4429,7 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
         # 🔧 FIX: Placeholder for signal stats during page navigation
         print(f"[DEBUG] ⏭️ SKIPPING SIGNAL STATS (page navigation): triggered={triggered_id}")
         signal_stats_table = html.Div("ℹ️ Detailed signal stats shown after data load/recalculation", 
-                                       style={"textAlign": "center", "padding": "10px", "color": "#666", "fontStyle": "italic"})
+                                       style={"textAlign": "center", "padding": "10px", "color": "#555", "fontStyle": "italic"})
         stats_elapsed = 0.0
     else:
         # 🔧 CRITICAL: Calculate signal stats on ALL tasks when data loads
