@@ -4018,12 +4018,6 @@ def update_task_table_only(current_page, version, lock_state):
     
     force_refresh = version is not None and version > 0
     
-    # Get previous version for comparison
-    prev_golden_version = getattr(update_task_table_only, '_last_golden_version', None)
-    
-    update_task_table_only._last_golden_version = current_golden_version
-    update_task_table_only._last_page = current_page
-
     # Pre-calculate helper functions ONCE - OPTIMIZED with native datetime
     from datetime import datetime, timezone
     
@@ -4057,10 +4051,14 @@ def update_task_table_only(current_page, version, lock_state):
     
     visible_tasks = tasks[start:end]
     
-    # ⚡ PERFORMANCE: Pre-calculate all stats on ALL tasks ONLY when version changes (not on page navigation)
-    # This is the KEY FIX - stats are calculated once per data load, not per page click
-    # CRITICAL: force_refresh is True when version > 0 (data changed), False for pure page nav
-    is_page_only_nav = (triggered_id == "task-page-store") and (version is None or version == 0 or version == prev_golden_version)
+    # ⚡ PERFORMANCE: Detect if this is ONLY a page navigation (no data change)
+    # Get previous version BEFORE updating it
+    prev_golden_version = getattr(update_task_table_only, '_last_golden_version', None)
+    is_page_only_nav = (triggered_id == "task-page-store") and (prev_golden_version is not None) and (current_golden_version == prev_golden_version)
+    
+    # Store current state for next comparison
+    update_task_table_only._last_golden_version = current_golden_version
+    update_task_table_only._last_page = current_page
     
     rows = []
     
@@ -4502,8 +4500,9 @@ def update_task_table_only(current_page, version, lock_state):
         )
     ])
     
-    # ⚡ CACHE THE RESULT for instant page switching
-    _page_html_cache[current_page] = result
+    # ⚡ CACHE THE RESULT for instant page switching (ONLY when full stats are calculated)
+    if not is_page_only_nav:
+        _page_html_cache[current_page] = result
     
     return result
 
