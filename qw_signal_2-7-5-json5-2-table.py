@@ -4592,7 +4592,7 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
         html.H4("Task Summary"),
         nav_container,
         html.Div(table, style={"overflow-x": "auto", "overflow-y": "auto", "max-height": "75vh", "width": "100%"}),
-        html.P(f"📄 Page {current_page+1} of {total_pages} | Showing tasks {start+1}-{min(end, len(tasks))} of {len(tasks)}", style={"textAlign":"center", "fontSize":"12px", "color":"#555"}),
+        html.P(f"📄 Page {current_page+1} of {total_pages} | Showing tasks {start_idx+1}-{min(end_idx, len(tasks))} of {len(tasks)}", style={"textAlign":"center", "fontSize":"12px", "color":"#555"}),
         stats_table,
         html.H5("Signal Performance Summary", style={"marginTop": "15px", "marginBottom": "5px"}),
         signal_stats_table,
@@ -4613,6 +4613,7 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
     # Print final timing
     timer.end()
     print(f"[TRACE] <<< COMPLETE Page {current_page} rendered in {timer.last_time - timer.start_time:.4f}s | Cache Size: {len(_page_html_cache)}")
+    print(f"[TRACE] ✓✓✓ RETURNING RESULT TO DASH UI ✓✓✓")
     
     return result
 
