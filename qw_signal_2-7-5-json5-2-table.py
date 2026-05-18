@@ -2561,19 +2561,8 @@ function applyHiddenColumns() {
         });
     });
 }
-// Set up a MutationObserver to reapply hidden columns after table updates
-const summaryDiv = document.getElementById('task-table-container');  // ✅ FIXED: Correct container ID
-if (summaryDiv) {
-    let debounceTimer;
-    const observer = new MutationObserver(function(mutations) {
-        // ⚡ DEBOUNCE: Only run once per batch of DOM changes (prevents infinite loops)
-        clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(() => {
-            applyHiddenColumns();
-        }, 50);  // 50ms debounce - fast enough for UX, slow enough to batch updates
-    });
-    observer.observe(summaryDiv, { childList: true, subtree: false });  // ✅ OPTIMIZED: No subtree observation
-}
+// ✅ OPTIMIZED: Removed MutationObserver - it was causing infinite loops and race conditions
+// Column hiding is now handled by CSS rules in the stylesheet, applied automatically on render
 // Existing button feedback (unchanged) - now supports both BUTTON and DIV elements
 document.addEventListener('click', function(e) {
     let target = e.target;
@@ -5662,7 +5651,6 @@ def run_walk_forward(n_clicks, task_id, range_mult, vol_mult, body_ratio, wick_r
         return f"Walk‑forward error: {str(e)}"
 
 @app.callback(
-    Output("task-table-container", "children", allow_duplicate=True),
     Input({"type": "rerun-strat-btn", "index": ALL}, "n_clicks"),
     prevent_initial_call=True
 )
@@ -5722,7 +5710,6 @@ def rerun_strategy(n_clicks_list):
         return no_update
 
 @app.callback(
-    Output("task-table-container", "children", allow_duplicate=True),
     Input({"type": "rerun-impulse-btn", "index": ALL}, "n_clicks"),
     prevent_initial_call=True
 )
