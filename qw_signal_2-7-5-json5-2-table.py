@@ -2170,7 +2170,8 @@ class TaskManager:
 tm = TaskManager()
 
 # 🔧 GLOBAL: Background recalc status tracker
-recalc_bg = {"running": False, "count": 0, "total": 0, "stop_flag": False}
+recalc_bg = {"running": False, "count": 0, "total": 0, "stop_flag": False, "trigger_val": 0}
+recalc_poller_enabled = False  # 🔧 Flag to control poller state
 
 # ---------- Verification Manager (Enhanced) ----------
 class VerificationManager:
@@ -2930,6 +2931,7 @@ app.layout = html.Div([
     dcc.Store(id="task-page-store", data=0),
     dcc.Store(id="analysis-complete-trigger", data=0), # 🔧 NEW: Triggers UI refresh after analysis
     dcc.Store(id="recalc-lock-store", data={"locked": False, "message": ""}),  # 🔧 RECALC LOCK STATE
+    dcc.Interval(id="recalc-poller", interval=1000, n_intervals=0, disabled=True),
 ])
 
 @app.callback(
@@ -3961,9 +3963,10 @@ _cached_golden_version = None
     Output("task-table-container", "children"),
     Input("task-page-store", "data"),
     Input("golden-store-version", "data"),
-    Input("recalc-lock-store", "data")
+    Input("recalc-lock-store", "data"),
+    Input("analysis-complete-trigger", "data")  # 🔧 NEW: Trigger UI refresh after recalculation completes
 )
-def update_task_table_only(current_page, version, lock_state):
+def update_task_table_only(current_page, version, lock_state, analysis_trigger):
     """Render task table ONLY. Uses aggressive caching to skip HTML generation on page changes."""
     global golden_task_store_data, golden_store_version, _page_html_cache, _cached_golden_version
     
@@ -6382,6 +6385,11 @@ def recalc_table_flags(n):
     recalc_bg["total"] = len(initial_tasks)
     recalc_bg["count"] = 0
     recalc_bg["stop_flag"] = False  # 🔧 Reset stop flag in recalc_bg dict
+    recalc_bg["trigger_val"] = 0  # 🔧 Reset trigger value
+    
+    # 🔧 CRITICAL: Enable the poller to monitor completion
+    global recalc_poller_enabled
+    recalc_poller_enabled = True
     
     # 🔧 CRITICAL: Start background thread passing initial_tasks as argument
     import threading
@@ -6615,6 +6623,34 @@ def poll_recalc_progress(_):
         else:
             return no_update, dash.no_update
     return f"⏳ Recalculating... {recalc_bg['count']}/{recalc_bg['total']} completed", dash.no_update
+
+# 🔧 NEW: Dedicated poller for triggering UI refresh after recalculation completes
+@app.callback(
+    Output("recalc-poller", "disabled"),
+    Output("analysis-complete-trigger", "data", allow_duplicate=True),
+    Input("recalc-poller", "n_intervals"),
+    State("recalc-poller", "disabled"),
+    prevent_initial_call=True
+)
+def trigger_ui_on_recalc_complete(n_intervals, is_disabled):
+    """Polls every 1 second during recalculation and triggers UI refresh when complete."""
+    global recalc_poller_enabled
+    
+    # Check if recalculation just finished
+    if not recalc_bg["running"] and recalc_poller_enabled:
+        # Recalculation just finished - trigger UI refresh
+        trigger_val = recalc_bg.get("trigger_val", int(time.time() * 1000))
+        print(f"🔥 [UI POLLER] Recalculation complete! Triggering UI refresh with value: {trigger_val}")
+        # Reset poller state
+        recalc_poller_enabled = False
+        # Enable (disable=True) the poller until next recalculation
+        return True, trigger_val
+    elif recalc_bg["running"] and not recalc_poller_enabled:
+        # Recalculation started - keep poller enabled (disabled=False)
+        recalc_poller_enabled = True
+        return False, dash.no_update
+    # Keep current state
+    return dash.no_update, dash.no_update
 
 if __name__ == "__main__":
     app.run(debug=True, port=8050)
