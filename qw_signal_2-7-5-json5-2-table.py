@@ -4024,6 +4024,7 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
         return dash.no_update
         
     triggered_id = ctx.triggered[0]['prop_id'].split('.')[0]
+    print(f"[DEBUG] 🔍 TRIGGER: {triggered_id} | version={version} | page={current_page}")
     timer.check(f"Trigger Detected: {triggered_id}")
     
     # If only lock changed, don't re-render table
@@ -4033,6 +4034,7 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
         return dash.no_update
     
     update_task_table_only._last_version = version
+    print(f"[DEBUG] 📊 STATE: golden_store_version={golden_store_version}, cache_size={len(_page_html_cache)}")
     
     # Lock check
     if lock_state and lock_state.get("locked", False):
@@ -4423,8 +4425,10 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
             html.Tr([html.Td("📉 Avg Drawdown Lvl (Page)"), html.Td(fmt_dd(avg_dd))])
         ]
         stats_table = html.Table([html.Tbody(stats_rows)], style={"border": "1px solid #ccc", "padding": "5px", "fontSize": "13px", "backgroundColor": "#f9f9f9"})
-        # Show empty placeholder for signal stats during page nav (will be filled on next data change)
-        signal_stats_table = html.Div("ℹ️ Detailed signal stats shown after data load/recalculation", style={"textAlign": "center", "padding": "10px", "color": "#666", "fontStyle": "italic"})
+        
+        # 🔧 FIX: Always calculate signal stats when NOT page-only navigation
+        print(f"[DEBUG] 🎯 CALCULATING SIGNAL STATS: triggered={triggered_id}, is_page_nav={is_page_only_nav}")
+        t_stats_start = time.time()
     else:
         # ✅ BASIC STATS: Calculate only when data changes (not on page nav)
         total_tasks = len(tasks)
@@ -4587,6 +4591,8 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
             html.Tr([html.Td("Delta Price 4%+ Total", style=td_style), html.Td(str(delta_4_plus_total), style=td_style)]),
         ]
         signal_stats_table = html.Table([html.Tbody(signal_stats_rows)], style={"border": "1px solid #4a90e2", "padding": "5px", "marginTop": "10px", "backgroundColor": "#f0f7ff"})
+        stats_elapsed = time.time() - t_stats_start
+        print(f"[DEBUG] ✅ SIGNAL STATS COMPLETE in {stats_elapsed:.2f}s")
     
     # 🔧 PAGINATION NAVIGATION
     nav_buttons = []
