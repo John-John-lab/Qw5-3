@@ -3960,18 +3960,18 @@ def update_summary_stats_only(version, lock_state):
 @app.callback(
     Output("task-table-container", "children"),
     Input("task-page-store", "data"),
-    Input("golden-store-version", "data"),  # ✅ FIXED: Listen to version instead of trigger
+    Input("golden-store-version", "data"),
     Input("recalc-lock-store", "data")
 )
 def update_task_table_only(current_page, version, lock_state):
-    """Render task table ONLY. Listens to page changes but does NO heavy stats calculation."""
+    """Render task table ONLY. Optimized to skip stats calculation on page changes."""
     global golden_task_store_data, golden_store_version
     
     # Validate global state
     if not hasattr(app, 'layout') or app.layout is None:
         return html.Div("", style={"display": "none"})
     
-    # Get triggered input to distinguish page change vs data reload
+    # Get triggered input
     ctx = dash.callback_context
     if not ctx.triggered:
         return dash.no_update
@@ -3982,7 +3982,6 @@ def update_task_table_only(current_page, version, lock_state):
     if triggered_id == "recalc-lock-store" and version == getattr(update_task_table_only, '_last_version', None):
         return dash.no_update
     
-    # Store current version for next comparison
     update_task_table_only._last_version = version
     
     # Lock check
@@ -3999,20 +3998,21 @@ def update_task_table_only(current_page, version, lock_state):
     if not tasks:
         return "No tasks."
     
-    # Cache check - skip if same page and same data version
+    # Cache check - CRITICAL OPTIMIZATION
     current_golden_version = golden_store_version
     prev_golden_version = getattr(update_task_table_only, "_last_golden_version", None)
     prev_page = getattr(update_task_table_only, "_last_page", None)
     
     force_refresh = version is not None and version > 0
     
+    # Skip if same page + same version (prevents unnecessary re-renders)
     if not force_refresh and current_golden_version == prev_golden_version and current_page == prev_page:
         return no_update
         
     update_task_table_only._last_golden_version = current_golden_version
     update_task_table_only._last_page = current_page
 
-    # ✅ Helpers
+    # Pre-calculate helper functions ONCE
     def fmt_time(ts):
         if ts is None: return "-"
         try:
@@ -4027,6 +4027,7 @@ def update_task_table_only(current_page, version, lock_state):
             return pd.to_datetime(ts, unit='ms', utc=True).strftime("%Y-%m-%d %H:%M")
         except Exception:
             return "-"
+    
     def fmt_dd(val):
         if val is None or (isinstance(val, float) and pd.isna(val)): return "-"
         return f"{val:.2f}%"
@@ -4040,8 +4041,15 @@ def update_task_table_only(current_page, version, lock_state):
     
     visible_tasks = tasks[start:end]
     
+    # ⚡ PERFORMANCE: Pre-calculate all stats on ALL tasks ONLY when version changes (not on page navigation)
+    # This is the KEY FIX - stats are calculated once per data load, not per page click
+    is_page_only_nav = triggered_id == "task-page-store" and not force_refresh
+    
     rows = []
+    
+    # ⚡ PERFORMANCE: Cache attribute access to avoid repeated getattr()
     for t in visible_tasks:
+        # ⚡ OPTIMIZATION: Direct attribute access instead of getattr where possible
         direction_display = t.signal_direction if t.signal_direction else "-"
         signal_time_display = pd.to_datetime(t.signal_time, unit='ms', utc=True).strftime("%Y-%m-%d %H:%M") if t.signal_time else "-"
         first_event_display = fmt_time(t.first_event_time)
@@ -4049,21 +4057,26 @@ def update_task_table_only(current_page, version, lock_state):
         price_change_display = f"{t.price_change_pct:.2f}%" if t.price_change_pct is not None else "-"
         reached_display = "Yes" if t.reached_level else "No"
         reversed_display = "Yes" if t.reversed_direction else "No"
-        hit_1_display = "Yes" if getattr(t, 'hit_1', False) else "No"
-        hit_1_5_display = "Yes" if getattr(t, 'hit_1_5', False) else "No"
-        hit_2_display = "Yes" if getattr(t, 'hit_2', False) else "No"
+        hit_1_display = "Yes" if t.hit_1 else "No"
+        hit_1_5_display = "Yes" if t.hit_1_5 else "No"
+        hit_2_display = "Yes" if t.hit_2 else "No"
         
-        strategy_display = getattr(t, 'strategy_log_summary', '-')
-        confidence_display = f"{getattr(t, 'strategy_confidence', 0):.1f}%" if getattr(t, 'strategy_confidence', 0) else "-"
-        impulse_display = str(sum(1 for sig in t.strategy_signals if sig.get('type') == 'impulse'))
+        strategy_display = t.strategy_log_summary if t.strategy_log_summary else '-'
+        strategy_conf = t.strategy_confidence if t.strategy_confidence else 0
+        confidence_display = f"{strategy_conf:.1f}%" if strategy_conf else "-"
+        
+        # ⚡ OPTIMIZATION: Count impulses once and cache
+        impulse_count = sum(1 for sig in t.strategy_signals if sig.get('type') == 'impulse')
+        impulse_display = str(impulse_count)
         
         # ✅ LOGIC: Respect the hide_logs checkbox setting per task
-        if getattr(t, 'hide_logs', True):
+        if t.hide_logs:
             log_display = html.Span("Logs are hidden", style={"color": "#888", "fontStyle": "italic", "fontSize": "12px"})
         else:
             # 🔧 PERFORMANCE: Replace heavy dcc.Textarea with lightweight html.Div
+            log_text = "\n".join(t.log) if t.log else "No logs yet..."
             log_display = html.Div(
-                "\n".join(t.log) if t.log else "No logs yet...",
+                log_text,
                 style={
                     "width": "100%", 
                     "maxHeight": "100px", 
@@ -4080,71 +4093,77 @@ def update_task_table_only(current_page, version, lock_state):
                 }
             )
             
-        # 🔧 PERFORMANCE: Convert heavy html.Button to lightweight html.Div with click handlers
-        # P1 IMPROVEMENT: Use data attributes instead of JSON IDs for better reliability
-        stop_btn = html.Div("Stop", 
-            id=f"btn-stop-{t.task_id}",
-            **{"data-action": "stop", "data-task-id": str(t.task_id)},
+        # 🔧 PERFORMANCE: Build buttons with minimal operations
+        task_id_str = str(t.task_id)
+        is_completed = t.status == "completed"
+        btn_disabled = "not-allowed" if not is_completed else "pointer"
+        btn_opacity = "0.6" if not is_completed else "1"
+        
+        stop_btn = html.Div("Stop", id=f"btn-stop-{task_id_str}",
+            **{"data-action": "stop", "data-task-id": task_id_str},
             style={"margin": "2px", "padding": "4px 8px", "backgroundColor": "#ffcccc", 
                    "borderRadius": "3px", "cursor": "pointer", "display": "inline-block", "fontSize": "11px"},
             className="interactive-button")
+        
         pause_label = "Resume" if t.paused else "Pause"
-        pause_btn = html.Div(pause_label, 
-            id=f"btn-pause-{t.task_id}",
-            **{"data-action": "pause", "data-task-id": str(t.task_id)},
-            style={"margin": "2px", "padding": "4px 8px", "backgroundColor": "#fff3cd" if t.paused else "#d1ecf1", 
+        pause_bg = "#fff3cd" if t.paused else "#d1ecf1"
+        pause_btn = html.Div(pause_label, id=f"btn-pause-{task_id_str}",
+            **{"data-action": "pause", "data-task-id": task_id_str},
+            style={"margin": "2px", "padding": "4px 8px", "backgroundColor": pause_bg, 
                    "borderRadius": "3px", "cursor": "pointer", "display": "inline-block", "fontSize": "11px"},
             className="interactive-button")
-        chart_btn = html.Div("Chart", 
-            id=f"btn-chart-{t.task_id}",
-            **{"data-action": "chart", "data-task-id": str(t.task_id)},
-            style={"margin": "2px", "padding": "4px 8px", "backgroundColor": "#d4edda" if t.status == "completed" else "#e9ecef", 
-                   "borderRadius": "3px", "cursor": "pointer" if t.status == "completed" else "not-allowed", 
-                   "display": "inline-block", "fontSize": "11px", "opacity": "1" if t.status == "completed" else "0.6"},
+        
+        chart_btn = html.Div("Chart", id=f"btn-chart-{task_id_str}",
+            **{"data-action": "chart", "data-task-id": task_id_str},
+            style={"margin": "2px", "padding": "4px 8px", "backgroundColor": "#d4edda" if is_completed else "#e9ecef", 
+                   "borderRadius": "3px", "cursor": btn_disabled, "display": "inline-block", 
+                   "fontSize": "11px", "opacity": btn_opacity},
             className="interactive-button")
-        details_btn = html.Div("Details", 
-            id=f"btn-details-{t.task_id}",
-            **{"data-action": "details", "data-task-id": str(t.task_id)},
-            style={"margin": "2px", "padding": "4px 8px", "backgroundColor": "#d4edda" if t.status == "completed" else "#e9ecef", 
-                   "borderRadius": "3px", "cursor": "pointer" if t.status == "completed" else "not-allowed", 
-                   "display": "inline-block", "fontSize": "11px", "opacity": "1" if t.status == "completed" else "0.6"},
+        
+        details_btn = html.Div("Details", id=f"btn-details-{task_id_str}",
+            **{"data-action": "details", "data-task-id": task_id_str},
+            style={"margin": "2px", "padding": "4px 8px", "backgroundColor": "#d4edda" if is_completed else "#e9ecef", 
+                   "borderRadius": "3px", "cursor": btn_disabled, "display": "inline-block", 
+                   "fontSize": "11px", "opacity": btn_opacity},
             className="interactive-button")
-        impulse_display_count = sum(1 for sig in t.strategy_signals if sig.get('type') == 'impulse')
-        impulse_btn = html.Div("Impulse", 
-            id=f"btn-impulse-{t.task_id}",
-            **{"data-action": "impulse", "data-task-id": str(t.task_id)},
-            style={"margin": "2px", "padding": "4px 8px", "backgroundColor": "#d4edda" if (t.status == "completed" and impulse_display_count > 0) else "#e9ecef", 
-                   "borderRadius": "3px", "cursor": "pointer" if (t.status == "completed" and impulse_display_count > 0) else "not-allowed", 
-                   "display": "inline-block", "fontSize": "11px", "opacity": "1" if (t.status == "completed" and impulse_display_count > 0) else "0.6"},
+        
+        impulse_has_data = is_completed and impulse_count > 0
+        impulse_btn = html.Div("Impulse", id=f"btn-impulse-{task_id_str}",
+            **{"data-action": "impulse", "data-task-id": task_id_str},
+            style={"margin": "2px", "padding": "4px 8px", "backgroundColor": "#d4edda" if impulse_has_data else "#e9ecef", 
+                   "borderRadius": "3px", "cursor": "pointer" if impulse_has_data else "not-allowed", 
+                   "display": "inline-block", "fontSize": "11px", 
+                   "opacity": "1" if impulse_has_data else "0.6"},
             className="interactive-button")
-        rerun_strat_btn = html.Div("Re‑run Strategy", 
-            id=f"btn-rerun-strat-{t.task_id}",
-            **{"data-action": "rerun-strat", "data-task-id": str(t.task_id)},
-            style={"margin": "2px", "padding": "3px 6px", "backgroundColor": "#d4edda" if t.status == "completed" else "#e9ecef", 
-                   "borderRadius": "3px", "cursor": "pointer" if t.status == "completed" else "not-allowed", 
-                   "display": "inline-block", "fontSize": "9px", "opacity": "1" if t.status == "completed" else "0.6"},
+        
+        rerun_strat_btn = html.Div("Re‑run Strategy", id=f"btn-rerun-strat-{task_id_str}",
+            **{"data-action": "rerun-strat", "data-task-id": task_id_str},
+            style={"margin": "2px", "padding": "3px 6px", "backgroundColor": "#d4edda" if is_completed else "#e9ecef", 
+                   "borderRadius": "3px", "cursor": btn_disabled, "display": "inline-block", 
+                   "fontSize": "9px", "opacity": btn_opacity},
             className="interactive-button")
-        rerun_impulse_btn = html.Div("Re‑run Impulse", 
-            id=f"btn-rerun-impulse-{t.task_id}",
-            **{"data-action": "rerun-impulse", "data-task-id": str(t.task_id)},
-            style={"margin": "2px", "padding": "3px 6px", "backgroundColor": "#d4edda" if t.status == "completed" else "#e9ecef", 
-                   "borderRadius": "3px", "cursor": "pointer" if t.status == "completed" else "not-allowed", 
-                   "display": "inline-block", "fontSize": "9px", "opacity": "1" if t.status == "completed" else "0.6"},
+        
+        rerun_impulse_btn = html.Div("Re‑run Impulse", id=f"btn-rerun-impulse-{task_id_str}",
+            **{"data-action": "rerun-impulse", "data-task-id": task_id_str},
+            style={"margin": "2px", "padding": "3px 6px", "backgroundColor": "#d4edda" if is_completed else "#e9ecef", 
+                   "borderRadius": "3px", "cursor": btn_disabled, "display": "inline-block", 
+                   "fontSize": "9px", "opacity": btn_opacity},
             className="interactive-button")
-        # 📺 TV Button: Opens TradingView with the correct Symbol & Timeframe
-        tv_url = f"https://www.tradingview.com/chart/?symbol=BYBIT:{t.symbols[0]}&interval={t.timeframe}"
+        
+        # 📺 TV Button
+        symbol = t.symbols[0] if t.symbols else ""
+        tv_url = f"https://www.tradingview.com/chart/?symbol=BYBIT:{symbol}&interval={t.timeframe}"
         tv_btn = html.A(
             html.Div("TV", style={"margin": "2px", "padding": "4px 8px", "backgroundColor": "#e7f3ff", 
                                   "borderRadius": "3px", "cursor": "pointer", "display": "inline-block", "fontSize": "11px"}),
-            href=tv_url,
-            target="_blank",
-            title="Open TradingView Chart"
+            href=tv_url, target="_blank", title="Open TradingView Chart"
         )
 
         button_cell = html.Div([stop_btn, pause_btn, chart_btn, details_btn, impulse_btn, rerun_strat_btn, rerun_impulse_btn, tv_btn])
 
+        # ⚡ OPTIMIZATION: Use cached attribute values
         rows.append(html.Tr([
-            html.Td(t.task_id[:8], style={"minWidth": "80px"}),
+            html.Td(task_id_str[:8], style={"minWidth": "80px"}),
             html.Td(t.status, style={"minWidth": "80px"}),
             html.Td(f"{t.progress:.1f}%", style={"minWidth": "70px"}),
             html.Td(", ".join(t.symbols), style={"minWidth": "100px"}),
@@ -4159,18 +4178,18 @@ def update_task_table_only(current_page, version, lock_state):
             html.Td(hit_1_display, style={"minWidth": "50px"}),
             html.Td(hit_1_5_display, style={"minWidth": "60px"}),
             html.Td(hit_2_display, style={"minWidth": "50px"}),
-            html.Td("Yes" if getattr(t, 'first_hit_1_expected', False) else "No", style={"minWidth": "50px"}),
-            html.Td(fmt_time(getattr(t, 'first_hit_1_expected_time', None)), style={"minWidth": "140px"}),
-            html.Td("Yes" if getattr(t, 'first_hit_1_5_expected', False) else "No", style={"minWidth": "60px"}),
-            html.Td(fmt_time(getattr(t, 'first_hit_1_5_expected_time', None)), style={"minWidth": "140px"}),
-            html.Td("Yes" if getattr(t, 'first_hit_2_expected', False) else "No", style={"minWidth": "50px"}),
-            html.Td(fmt_time(getattr(t, 'first_hit_2_expected_time', None)), style={"minWidth": "140px"}),
-            html.Td("Yes" if getattr(t, 'first_hit_1_opposite', False) else "No", style={"minWidth": "50px"}),
-            html.Td(fmt_time(getattr(t, 'first_hit_1_opposite_time', None)), style={"minWidth": "140px"}),
-            html.Td("Yes" if getattr(t, 'first_hit_1_5_opposite', False) else "No", style={"minWidth": "60px"}),
-            html.Td(fmt_time(getattr(t, 'first_hit_1_5_opposite_time', None)), style={"minWidth": "140px"}),
-            html.Td("Yes" if getattr(t, 'first_hit_2_opposite', False) else "No", style={"minWidth": "50px"}),
-            html.Td(fmt_time(getattr(t, 'first_hit_2_opposite_time', None)), style={"minWidth": "140px"}),
+            html.Td("Yes" if t.first_hit_1_expected else "No", style={"minWidth": "50px"}),
+            html.Td(fmt_time(t.first_hit_1_expected_time), style={"minWidth": "140px"}),
+            html.Td("Yes" if t.first_hit_1_5_expected else "No", style={"minWidth": "60px"}),
+            html.Td(fmt_time(t.first_hit_1_5_expected_time), style={"minWidth": "140px"}),
+            html.Td("Yes" if t.first_hit_2_expected else "No", style={"minWidth": "50px"}),
+            html.Td(fmt_time(t.first_hit_2_expected_time), style={"minWidth": "140px"}),
+            html.Td("Yes" if t.first_hit_1_opposite else "No", style={"minWidth": "50px"}),
+            html.Td(fmt_time(t.first_hit_1_opposite_time), style={"minWidth": "140px"}),
+            html.Td("Yes" if t.first_hit_1_5_opposite else "No", style={"minWidth": "60px"}),
+            html.Td(fmt_time(t.first_hit_1_5_opposite_time), style={"minWidth": "140px"}),
+            html.Td("Yes" if t.first_hit_2_opposite else "No", style={"minWidth": "50px"}),
+            html.Td(fmt_time(t.first_hit_2_opposite_time), style={"minWidth": "140px"}),
             html.Td(fmt_dd(t.max_adverse_move_pct), style={"minWidth": "100px"}, className="strike-through" if not t.reached_level else ""),
             html.Td(fmt_time(t.max_adverse_time), style={"minWidth": "140px"}, className="strike-through" if not t.reached_level else ""),
             html.Td(fmt_dd(t.max_expected_move_pct), style={"minWidth": "100px"}, className="strike-through" if not t.reached_level else ""),
@@ -4183,14 +4202,14 @@ def update_task_table_only(current_page, version, lock_state):
             html.Td(fmt_time(t.max_adverse_before_return_sgnl_time) if t.returned_to_sgnl else "-", style={"minWidth": "140px"}),
             html.Td(fmt_dd(t.max_expected_sgnl_pct), style={"minWidth": "100px"}),
             html.Td(fmt_time(t.max_expected_sgnl_time), style={"minWidth": "140px"}),
-            html.Td(fmt_dd(getattr(t, 'drawdown_before_level', None)), style={"minWidth": "80px"}),
-            html.Td(fmt_time(getattr(t, 'drawdown_before_level_time', None)), style={"minWidth": "140px"}),
-            html.Td(fmt_dd(getattr(t, 'drawdown_before_1pct', None)), style={"minWidth": "80px"}),
-            html.Td(fmt_time(getattr(t, 'drawdown_before_1pct_time', None)), style={"minWidth": "140px"}),
-            html.Td(fmt_dd(getattr(t, 'drawdown_before_1_5pct', None)), style={"minWidth": "80px"}),
-            html.Td(fmt_time(getattr(t, 'drawdown_before_1_5pct_time', None)), style={"minWidth": "140px"}),
-            html.Td(fmt_dd(getattr(t, 'drawdown_before_2pct', None)), style={"minWidth": "80px"}),
-            html.Td(fmt_time(getattr(t, 'drawdown_before_2pct_time', None)), style={"minWidth": "140px"}),
+            html.Td(fmt_dd(t.drawdown_before_level), style={"minWidth": "80px"}),
+            html.Td(fmt_time(t.drawdown_before_level_time), style={"minWidth": "140px"}),
+            html.Td(fmt_dd(t.drawdown_before_1pct), style={"minWidth": "80px"}),
+            html.Td(fmt_time(t.drawdown_before_1pct_time), style={"minWidth": "140px"}),
+            html.Td(fmt_dd(t.drawdown_before_1_5pct), style={"minWidth": "80px"}),
+            html.Td(fmt_time(t.drawdown_before_1_5pct_time), style={"minWidth": "140px"}),
+            html.Td(fmt_dd(t.drawdown_before_2pct), style={"minWidth": "80px"}),
+            html.Td(fmt_time(t.drawdown_before_2pct_time), style={"minWidth": "140px"}),
             html.Td(strategy_display, style={"minWidth": "120px"}),
             html.Td(confidence_display, style={"minWidth": "80px"}),
             html.Td(impulse_display, style={"minWidth": "80px"}),
@@ -4256,168 +4275,174 @@ def update_task_table_only(current_page, version, lock_state):
         html.Tbody(rows)
     ], style={"width": "100%", "borderCollapse": "collapse"})
     
-    # ✅ BASIC STATS: Clear separation of Completed vs Total Tasks
-    total_tasks = len(tasks)
-    completed_count = sum(1 for t in tasks if t.status == "completed")
-    
-    # Page-specific averages (calculated only on visible rows)
-    avg_adv = np.mean([t.max_adverse_move_pct for t in visible_tasks if t.max_adverse_move_pct is not None and not pd.isna(t.max_adverse_move_pct)] or [0])
-    avg_dd = np.mean([t.drawdown_before_level for t in visible_tasks if t.drawdown_before_level is not None and not pd.isna(t.drawdown_before_level)] or [0])
-    
-    stats_rows = [
-        html.Tr([html.Td("✅ Task Completed 100%"), html.Td(str(completed_count))]),
-        html.Tr([html.Td("📦 Total Task"), html.Td(str(total_tasks))]),
-        html.Tr([html.Td("📉 Avg Max Adverse (Page)"), html.Td(fmt_dd(avg_adv))]),
-        html.Tr([html.Td("📉 Avg Drawdown Lvl (Page)"), html.Td(fmt_dd(avg_dd))])
-    ]
-    stats_table = html.Table([html.Tbody(stats_rows)], style={"border": "1px solid #ccc", "padding": "5px", "fontSize": "13px", "backgroundColor": "#f9f9f9"})
-    
-    # ✅ SIGNAL STATS: Calculated on ALL in-memory tasks (consistent denominator)
-    reached_level_cnt = sum(1 for t in tasks if getattr(t, 'reached_level', False))
-    reversed_dir_cnt = sum(1 for t in tasks if getattr(t, 'reversed_direction', False))
-    # 🔧 LOGICAL FIX: Only count hits if level was actually reached (eliminates gap/false positives)
-    hit_1_cnt = sum(1 for t in tasks if getattr(t, 'reached_level', False) and getattr(t, 'hit_1', False))
-    hit_1_5_cnt = sum(1 for t in tasks if getattr(t, 'reached_level', False) and getattr(t, 'hit_1_5', False))
-    hit_2_cnt = sum(1 for t in tasks if getattr(t, 'reached_level', False) and getattr(t, 'hit_2', False))
-    
-    def fmt_stat(stat_count, total):
-        if total == 0: return "0 / 0 (0.0%)"
-        return f"{stat_count} / {total} ({(stat_count/total)*100:.1f}%)"
+    # ⚡ PERFORMANCE: Skip heavy stats calculation on page-only navigation
+    # This is the CRITICAL FIX - stats are calculated ONLY when version changes (data reload/recalc)
+    if is_page_only_nav:
+        # Return minimal stats for page navigation (no heavy iteration over all tasks)
+        stats_table = html.Div("", style={"display": "none"})
+        signal_stats_table = html.Div("", style={"display": "none"})
+    else:
+        # ✅ BASIC STATS: Calculate only when data changes (not on page nav)
+        total_tasks = len(tasks)
+        completed_count = sum(1 for t in tasks if t.status == "completed")
+        
+        # Page-specific averages (calculated only on visible rows)
+        avg_adv = np.mean([t.max_adverse_move_pct for t in visible_tasks if t.max_adverse_move_pct is not None and not pd.isna(t.max_adverse_move_pct)] or [0])
+        avg_dd = np.mean([t.drawdown_before_level for t in visible_tasks if t.drawdown_before_level is not None and not pd.isna(t.drawdown_before_level)] or [0])
+        
+        stats_rows = [
+            html.Tr([html.Td("✅ Task Completed 100%"), html.Td(str(completed_count))]),
+            html.Tr([html.Td("📦 Total Task"), html.Td(str(total_tasks))]),
+            html.Tr([html.Td("📉 Avg Max Adverse (Page)"), html.Td(fmt_dd(avg_adv))]),
+            html.Tr([html.Td("📉 Avg Drawdown Lvl (Page)"), html.Td(fmt_dd(avg_dd))])
+        ]
+        stats_table = html.Table([html.Tbody(stats_rows)], style={"border": "1px solid #ccc", "padding": "5px", "fontSize": "13px", "backgroundColor": "#f9f9f9"})
+        
+        # ✅ SIGNAL STATS: Calculated on ALL in-memory tasks (consistent denominator)
+        reached_level_cnt = sum(1 for t in tasks if t.reached_level)
+        reversed_dir_cnt = sum(1 for t in tasks if t.reversed_direction)
+        hit_1_cnt = sum(1 for t in tasks if t.reached_level and t.hit_1)
+        hit_1_5_cnt = sum(1 for t in tasks if t.reached_level and t.hit_1_5)
+        hit_2_cnt = sum(1 for t in tasks if t.reached_level and t.hit_2)
+        
+        def fmt_stat(stat_count, total):
+            if total == 0: return "0 / 0 (0.0%)"
+            return f"{stat_count} / {total} ({(stat_count/total)*100:.1f}%)"
 
-    # ----- Max Adverse Distribution Stats (compact format) -----
-    def get_adverse_range(pct):
-        if pct is None or (isinstance(pct, float) and pd.isna(pct)):
+        # ----- Max Adverse Distribution Stats (compact format) -----
+        def get_adverse_range(pct):
+            if pct is None or (isinstance(pct, float) and pd.isna(pct)):
+                return None
+            if 0 <= pct < 0.5: return "0-0.5%"
+            elif 0.5 <= pct < 1: return "0.5-1%"
+            elif 1 <= pct < 2: return "1-2%"
+            elif 2 <= pct < 3: return "2-3%"
+            elif 3 <= pct < 4: return "3-4%"
+            elif 4 <= pct < 5: return "4-5%"
+            elif 5 <= pct < 10: return "5-10%"
+            elif 10 <= pct < 20: return "10-20%"
+            elif 20 <= pct < 30: return "20-30%"
+            elif pct >= 30: return ">30%"
             return None
-        if 0 <= pct < 0.5: return "0-0.5%"
-        elif 0.5 <= pct < 1: return "0.5-1%"
-        elif 1 <= pct < 2: return "1-2%"
-        elif 2 <= pct < 3: return "2-3%"
-        elif 3 <= pct < 4: return "3-4%"
-        elif 4 <= pct < 5: return "4-5%"
-        elif 5 <= pct < 10: return "5-10%"
-        elif 10 <= pct < 20: return "10-20%"
-        elif 20 <= pct < 30: return "20-30%"
-        elif pct >= 30: return ">30%"
-        return None
 
-    # Count tasks in each adverse range (only for reached_level tasks)
-    adverse_counts = {}
-    for t in tasks:
-        adv = getattr(t, 'max_adverse_move_pct', None)
-        if t.reached_level and adv is not None and not (isinstance(adv, float) and pd.isna(adv)):
-            range_key = get_adverse_range(adv)
-            if range_key:
-                adverse_counts[range_key] = adverse_counts.get(range_key, 0) + 1
+        # Count tasks in each adverse range (only for reached_level tasks)
+        adverse_counts = {}
+        for t in tasks:
+            adv = t.max_adverse_move_pct
+            if t.reached_level and adv is not None and not (isinstance(adv, float) and pd.isna(adv)):
+                range_key = get_adverse_range(adv)
+                if range_key:
+                    adverse_counts[range_key] = adverse_counts.get(range_key, 0) + 1
 
-    # Format as two compact rows (5 ranges each) to save vertical space
-    ranges = ["0-0.5%", "0.5-1%", "1-2%", "2-3%", "3-4%", "4-5%", "5-10%", "10-20%", "20-30%", ">30%"]
-    row1_adv = " | ".join([f"{r}:{adverse_counts.get(r,0)}" for r in ranges[:5]])
-    row2_adv = " | ".join([f"{r}:{adverse_counts.get(r,0)}" for r in ranges[5:]])
+        # Format as two compact rows (5 ranges each) to save vertical space
+        ranges = ["0-0.5%", "0.5-1%", "1-2%", "2-3%", "3-4%", "4-5%", "5-10%", "10-20%", "20-30%", ">30%"]
+        row1_adv = " | ".join([f"{r}:{adverse_counts.get(r,0)}" for r in ranges[:5]])
+        row2_adv = " | ".join([f"{r}:{adverse_counts.get(r,0)}" for r in ranges[5:]])
 
-    # 🔧 Calculate cumulative totals for Max Adverse
-    adv_05_plus_total = 0
-    adv_4_plus_total = 0
-    for t in tasks:
-        adv = getattr(t, 'max_adverse_move_pct', None)
-        if t.reached_level and adv is not None and not (isinstance(adv, float) and pd.isna(adv)):
-            if adv >= 0.5:
-                adv_05_plus_total += 1
-            if adv >= 4.0:
-                adv_4_plus_total += 1
+        # 🔧 Calculate cumulative totals for Max Adverse
+        adv_05_plus_total = 0
+        adv_4_plus_total = 0
+        for t in tasks:
+            adv = t.max_adverse_move_pct
+            if t.reached_level and adv is not None and not (isinstance(adv, float) and pd.isna(adv)):
+                if adv >= 0.5:
+                    adv_05_plus_total += 1
+                if adv >= 4.0:
+                    adv_4_plus_total += 1
 
-    # 🔧 NEW: Calculate distribution & cumulative totals for Max Expected
-    exp_counts = {}
-    exp_05_plus_total = 0
-    exp_4_plus_total = 0
-    for t in tasks:
-        exp = getattr(t, 'max_expected_move_pct', None)
-        if t.reached_level and exp is not None and not (isinstance(exp, float) and pd.isna(exp)):
-            range_key = get_adverse_range(exp)  # Reuses existing range logic
-            if range_key:
-                exp_counts[range_key] = exp_counts.get(range_key, 0) + 1
-            if exp >= 0.5:
-                exp_05_plus_total += 1
-            if exp >= 4.0:
-                exp_4_plus_total += 1
+        # 🔧 NEW: Calculate distribution & cumulative totals for Max Expected
+        exp_counts = {}
+        exp_05_plus_total = 0
+        exp_4_plus_total = 0
+        for t in tasks:
+            exp = t.max_expected_move_pct
+            if t.reached_level and exp is not None and not (isinstance(exp, float) and pd.isna(exp)):
+                range_key = get_adverse_range(exp)
+                if range_key:
+                    exp_counts[range_key] = exp_counts.get(range_key, 0) + 1
+                if exp >= 0.5:
+                    exp_05_plus_total += 1
+                if exp >= 4.0:
+                    exp_4_plus_total += 1
                 
-    row1_exp = " | ".join([f"{r}:{exp_counts.get(r,0)}" for r in ranges[:5]])
-    row2_exp = " | ".join([f"{r}:{exp_counts.get(r,0)}" for r in ranges[5:]])
+        row1_exp = " | ".join([f"{r}:{exp_counts.get(r,0)}" for r in ranges[:5]])
+        row2_exp = " | ".join([f"{r}:{exp_counts.get(r,0)}" for r in ranges[5:]])
 
-    # Define uniform style for all cells in the summary table
-    td_style = {"fontSize": "13px", "fontWeight": "normal", "padding": "2px 5px"}
-    
-    # Calculate (sgnl) statistics for Adverse & Expected
-    adv_sgnl_counts = {}; exp_sgnl_counts = {}
-    adv_sgnl_05 = 0; adv_sgnl_4 = 0; exp_sgnl_05 = 0; exp_sgnl_4 = 0
-    for t in tasks:
-        adv_s = getattr(t, 'max_adverse_sgnl_pct', None)
-        if adv_s is not None and not (isinstance(adv_s, float) and pd.isna(adv_s)):
-            r = get_adverse_range(adv_s)
-            if r: adv_sgnl_counts[r] = adv_sgnl_counts.get(r, 0) + 1
-            if adv_s >= 0.5: adv_sgnl_05 += 1
-            if adv_s >= 4.0: adv_sgnl_4 += 1
-        exp_s = getattr(t, 'max_expected_sgnl_pct', None)
-        if exp_s is not None and not (isinstance(exp_s, float) and pd.isna(exp_s)):
-            r = get_adverse_range(exp_s)
-            if r: exp_sgnl_counts[r] = exp_sgnl_counts.get(r, 0) + 1
-            if exp_s >= 0.5: exp_sgnl_05 += 1
-            if exp_s >= 4.0: exp_sgnl_4 += 1
-            
-    row1_adv_s = " | ".join([f"{r}:{adv_sgnl_counts.get(r,0)}" for r in ranges[:5]])
-    row2_adv_s = " | ".join([f"{r}:{adv_sgnl_counts.get(r,0)}" for r in ranges[5:]])
-    row1_exp_s = " | ".join([f"{r}:{exp_sgnl_counts.get(r,0)}" for r in ranges[:5]])
-    row2_exp_s = " | ".join([f"{r}:{exp_sgnl_counts.get(r,0)}" for r in ranges[5:]])
-    
-    # Delta Price (sgnl to lvl) Distribution
-    delta_counts = {k: 0 for k in ranges}
-    delta_05_plus_total = 0
-    delta_4_plus_total = 0
-    for t in tasks:
-        dp = getattr(t, 'price_change_pct', None)
-        if dp is not None and not (isinstance(dp, float) and pd.isna(dp)):
-            val = abs(dp)  # Use magnitude for consistent distribution
-            r = get_adverse_range(val)
-            if r:
-                delta_counts[r] += 1
-            if val >= 0.5: delta_05_plus_total += 1
-            if val >= 4.0: delta_4_plus_total += 1
+        # Define uniform style for all cells in the summary table
+        td_style = {"fontSize": "13px", "fontWeight": "normal", "padding": "2px 5px"}
+        
+        # Calculate (sgnl) statistics for Adverse & Expected - OPTIMIZED with direct attribute access
+        adv_sgnl_counts = {}; exp_sgnl_counts = {}
+        adv_sgnl_05 = 0; adv_sgnl_4 = 0; exp_sgnl_05 = 0; exp_sgnl_4 = 0
+        for t in tasks:
+            adv_s = t.max_adverse_sgnl_pct
+            if adv_s is not None and not (isinstance(adv_s, float) and pd.isna(adv_s)):
+                r = get_adverse_range(adv_s)
+                if r: adv_sgnl_counts[r] = adv_sgnl_counts.get(r, 0) + 1
+                if adv_s >= 0.5: adv_sgnl_05 += 1
+                if adv_s >= 4.0: adv_sgnl_4 += 1
+            exp_s = t.max_expected_sgnl_pct
+            if exp_s is not None and not (isinstance(exp_s, float) and pd.isna(exp_s)):
+                r = get_adverse_range(exp_s)
+                if r: exp_sgnl_counts[r] = exp_sgnl_counts.get(r, 0) + 1
+                if exp_s >= 0.5: exp_sgnl_05 += 1
+                if exp_s >= 4.0: exp_sgnl_4 += 1
+                
+        row1_adv_s = " | ".join([f"{r}:{adv_sgnl_counts.get(r,0)}" for r in ranges[:5]])
+        row2_adv_s = " | ".join([f"{r}:{adv_sgnl_counts.get(r,0)}" for r in ranges[5:]])
+        row1_exp_s = " | ".join([f"{r}:{exp_sgnl_counts.get(r,0)}" for r in ranges[:5]])
+        row2_exp_s = " | ".join([f"{r}:{exp_sgnl_counts.get(r,0)}" for r in ranges[5:]])
+        
+        # Delta Price (sgnl to lvl) Distribution
+        delta_counts = {k: 0 for k in ranges}
+        delta_05_plus_total = 0
+        delta_4_plus_total = 0
+        for t in tasks:
+            dp = t.price_change_pct
+            if dp is not None and not (isinstance(dp, float) and pd.isna(dp)):
+                val = abs(dp)
+                r = get_adverse_range(val)
+                if r:
+                    delta_counts[r] += 1
+                if val >= 0.5: delta_05_plus_total += 1
+                if val >= 4.0: delta_4_plus_total += 1
 
-    row1_delta = " | ".join([f"{r}:{delta_counts[r]}" for r in ranges[:5]])
-    row2_delta = " | ".join([f"{r}:{delta_counts[r]}" for r in ranges[5:]])
+        row1_delta = " | ".join([f"{r}:{delta_counts[r]}" for r in ranges[:5]])
+        row2_delta = " | ".join([f"{r}:{delta_counts[r]}" for r in ranges[5:]])
 
-    signal_stats_rows = [
-        html.Tr([html.Td("Reached Level", style=td_style), html.Td(fmt_stat(reached_level_cnt, total_tasks), style=td_style)]),
-        html.Tr([html.Td("Reversed Direction", style=td_style), html.Td(fmt_stat(reversed_dir_cnt, total_tasks), style=td_style)]),
-        html.Tr([html.Td("Hit 1% (from level)", style=td_style), html.Td(fmt_stat(hit_1_cnt, total_tasks), style=td_style)]),
-        html.Tr([html.Td("Hit 1.5% (from level)", style=td_style), html.Td(fmt_stat(hit_1_5_cnt, total_tasks), style=td_style)]),
-        html.Tr([html.Td("Hit 2% (from level)", style=td_style), html.Td(fmt_stat(hit_2_cnt, total_tasks), style=td_style)]),
-        # Max Adverse (lvl) Rows
-        html.Tr([html.Td("Max Adv 0-4% (lvl)", style=td_style), html.Td(row1_adv, style=td_style)]),
-        html.Tr([html.Td("Max Adv 4%+ (lvl)", style=td_style), html.Td(row2_adv, style=td_style)]),
-        html.Tr([html.Td("Max Adv 0.5%+ Total (lvl)", style=td_style), html.Td(str(adv_05_plus_total), style=td_style)]),
-        html.Tr([html.Td("Max Adv 4%+ Total (lvl)", style=td_style), html.Td(str(adv_4_plus_total), style=td_style)]),
-        # Max Expected (lvl) Rows
-        html.Tr([html.Td("Max Exp 0-4% (lvl)", style=td_style), html.Td(row1_exp, style=td_style)]),
-        html.Tr([html.Td("Max Exp 4%+ (lvl)", style=td_style), html.Td(row2_exp, style=td_style)]),
-        html.Tr([html.Td("Max Exp 0.5%+ Total (lvl)", style=td_style), html.Td(str(exp_05_plus_total), style=td_style)]),
-        html.Tr([html.Td("Max Exp 4%+ Total (lvl)", style=td_style), html.Td(str(exp_4_plus_total), style=td_style)]),
-        # Max Adverse (sgnl) Rows
-        html.Tr([html.Td("Max Adv 0-4% (sgnl)", style=td_style), html.Td(row1_adv_s, style=td_style)]),
-        html.Tr([html.Td("Max Adv 4%+ (sgnl)", style=td_style), html.Td(row2_adv_s, style=td_style)]),
-        html.Tr([html.Td("Max Adv 0.5%+ Total (sgnl)", style=td_style), html.Td(str(adv_sgnl_05), style=td_style)]),
-        html.Tr([html.Td("Max Adv 4%+ Total (sgnl)", style=td_style), html.Td(str(adv_sgnl_4), style=td_style)]),
-        # Max Expected (sgnl) Rows
-        html.Tr([html.Td("Max Exp 0-4% (sgnl)", style=td_style), html.Td(row1_exp_s, style=td_style)]),
-        html.Tr([html.Td("Max Exp 4%+ (sgnl)", style=td_style), html.Td(row2_exp_s, style=td_style)]),
-        html.Tr([html.Td("Max Exp 0.5%+ Total (sgnl)", style=td_style), html.Td(str(exp_sgnl_05), style=td_style)]),
-        html.Tr([html.Td("Max Exp 4%+ Total (sgnl)", style=td_style), html.Td(str(exp_sgnl_4), style=td_style)]),
-        # Delta Price Rows (NEW)
-        html.Tr([html.Td("Delta Price 0-4%", style=td_style), html.Td(row1_delta, style=td_style)]),
-        html.Tr([html.Td("Delta Price 4%+", style=td_style), html.Td(row2_delta, style=td_style)]),
-        html.Tr([html.Td("Delta Price 0.5%+ Total", style=td_style), html.Td(str(delta_05_plus_total), style=td_style)]),
-        html.Tr([html.Td("Delta Price 4%+ Total", style=td_style), html.Td(str(delta_4_plus_total), style=td_style)]),
-    ]
-    signal_stats_table = html.Table([html.Tbody(signal_stats_rows)], style={"border": "1px solid #4a90e2", "padding": "5px", "marginTop": "10px", "backgroundColor": "#f0f7ff"})
+        signal_stats_rows = [
+            html.Tr([html.Td("Reached Level", style=td_style), html.Td(fmt_stat(reached_level_cnt, total_tasks), style=td_style)]),
+            html.Tr([html.Td("Reversed Direction", style=td_style), html.Td(fmt_stat(reversed_dir_cnt, total_tasks), style=td_style)]),
+            html.Tr([html.Td("Hit 1% (from level)", style=td_style), html.Td(fmt_stat(hit_1_cnt, total_tasks), style=td_style)]),
+            html.Tr([html.Td("Hit 1.5% (from level)", style=td_style), html.Td(fmt_stat(hit_1_5_cnt, total_tasks), style=td_style)]),
+            html.Tr([html.Td("Hit 2% (from level)", style=td_style), html.Td(fmt_stat(hit_2_cnt, total_tasks), style=td_style)]),
+            # Max Adverse (lvl) Rows
+            html.Tr([html.Td("Max Adv 0-4% (lvl)", style=td_style), html.Td(row1_adv, style=td_style)]),
+            html.Tr([html.Td("Max Adv 4%+ (lvl)", style=td_style), html.Td(row2_adv, style=td_style)]),
+            html.Tr([html.Td("Max Adv 0.5%+ Total (lvl)", style=td_style), html.Td(str(adv_05_plus_total), style=td_style)]),
+            html.Tr([html.Td("Max Adv 4%+ Total (lvl)", style=td_style), html.Td(str(adv_4_plus_total), style=td_style)]),
+            # Max Expected (lvl) Rows
+            html.Tr([html.Td("Max Exp 0-4% (lvl)", style=td_style), html.Td(row1_exp, style=td_style)]),
+            html.Tr([html.Td("Max Exp 4%+ (lvl)", style=td_style), html.Td(row2_exp, style=td_style)]),
+            html.Tr([html.Td("Max Exp 0.5%+ Total (lvl)", style=td_style), html.Td(str(exp_05_plus_total), style=td_style)]),
+            html.Tr([html.Td("Max Exp 4%+ Total (lvl)", style=td_style), html.Td(str(exp_4_plus_total), style=td_style)]),
+            # Max Adverse (sgnl) Rows
+            html.Tr([html.Td("Max Adv 0-4% (sgnl)", style=td_style), html.Td(row1_adv_s, style=td_style)]),
+            html.Tr([html.Td("Max Adv 4%+ (sgnl)", style=td_style), html.Td(row2_adv_s, style=td_style)]),
+            html.Tr([html.Td("Max Adv 0.5%+ Total (sgnl)", style=td_style), html.Td(str(adv_sgnl_05), style=td_style)]),
+            html.Tr([html.Td("Max Adv 4%+ Total (sgnl)", style=td_style), html.Td(str(adv_sgnl_4), style=td_style)]),
+            # Max Expected (sgnl) Rows
+            html.Tr([html.Td("Max Exp 0-4% (sgnl)", style=td_style), html.Td(row1_exp_s, style=td_style)]),
+            html.Tr([html.Td("Max Exp 4%+ (sgnl)", style=td_style), html.Td(row2_exp_s, style=td_style)]),
+            html.Tr([html.Td("Max Exp 0.5%+ Total (sgnl)", style=td_style), html.Td(str(exp_sgnl_05), style=td_style)]),
+            html.Tr([html.Td("Max Exp 4%+ Total (sgnl)", style=td_style), html.Td(str(exp_sgnl_4), style=td_style)]),
+            # Delta Price Rows
+            html.Tr([html.Td("Delta Price 0-4%", style=td_style), html.Td(row1_delta, style=td_style)]),
+            html.Tr([html.Td("Delta Price 4%+", style=td_style), html.Td(row2_delta, style=td_style)]),
+            html.Tr([html.Td("Delta Price 0.5%+ Total", style=td_style), html.Td(str(delta_05_plus_total), style=td_style)]),
+            html.Tr([html.Td("Delta Price 4%+ Total", style=td_style), html.Td(str(delta_4_plus_total), style=td_style)]),
+        ]
+        signal_stats_table = html.Table([html.Tbody(signal_stats_rows)], style={"border": "1px solid #4a90e2", "padding": "5px", "marginTop": "10px", "backgroundColor": "#f0f7ff"})
     
     # 🔧 PAGINATION NAVIGATION
     nav_buttons = []
