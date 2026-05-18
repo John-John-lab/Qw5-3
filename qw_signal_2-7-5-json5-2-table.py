@@ -238,6 +238,38 @@ PAGE_SIZE = 300
 
 # Global timestamp to force summary table refresh after recalculation
 recalculation_complete_timestamp = 0
+
+# =============================================================================
+# PERFORMANCE TRACING UTILITIES
+# =============================================================================
+
+class PerfTimer:
+    """High-precision timer for performance tracing."""
+    def __init__(self, label):
+        self.label = label
+        self.start_time = None
+        self.last_time = None
+        
+    def start(self):
+        self.start_time = time.perf_counter()
+        self.last_time = self.start_time
+        print(f"[TRACE] ⏱️  START: {self.label}")
+        return self
+        
+    def check(self, step_name):
+        current = time.perf_counter()
+        elapsed = current - self.last_time
+        total = current - self.start_time
+        print(f"[TRACE]    └─ {step_name}: {elapsed:.4f}s (Total: {total:.4f}s)")
+        self.last_time = current
+        return self
+        
+    def end(self):
+        if self.start_time:
+            total = time.perf_counter() - self.start_time
+            print(f"[TRACE] ✅ END: {self.label} ({total:.4f}s)")
+        return self
+
 # 🔧 GOLDEN STORE: Pre-processed task data cache
 golden_task_store_data = None
 golden_store_version = 0
@@ -248,6 +280,10 @@ recalc_progress_count = 0  # for the status bar
 recalc_total_tasks = 0
 STOP_REQUESTED = False  # Patch A: Hard Stop Flag for safe interruption
 current_tasks = []  # Master dataset in RAM for atomic swaps
+
+# Pagination & Caching State
+page_html_cache = {}  # Cache for rendered page HTML: {page_num: html.Div}
+last_rendered_stats = {} # Cache for summary tables to prevent disappearance
 
 # ---------- Low-RAM Parquet Cache ----------
 @functools.lru_cache(maxsize=4)  # Holds max 4 DFs to protect old Mac RAM
@@ -3973,79 +4009,93 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
     """Render task table ONLY. Uses aggressive caching to skip HTML generation on page changes."""
     global golden_task_store_data, golden_store_version, _page_html_cache, _cached_golden_version
     
+    # Initialize timer for full trace
+    timer = PerfTimer(f"Page {current_page} Render (v{version})").start()
+    
     # Validate global state
     if not hasattr(app, 'layout') or app.layout is None:
+        timer.check("Validation Failed").end()
         return html.Div("", style={"display": "none"})
     
     # Get triggered input
     ctx = dash.callback_context
     if not ctx.triggered:
+        timer.check("No Trigger").end()
         return dash.no_update
         
     triggered_id = ctx.triggered[0]['prop_id'].split('.')[0]
+    timer.check(f"Trigger Detected: {triggered_id}")
     
     # If only lock changed, don't re-render table
     if triggered_id == "recalc-lock-store" and version == getattr(update_task_table_only, '_last_version', None):
+        print(f"[TRACE] Skipping render - lock change only")
+        timer.check("Lock Skip").end()
         return dash.no_update
     
     update_task_table_only._last_version = version
     
     # Lock check
     if lock_state and lock_state.get("locked", False):
+        timer.check("Lock Active").end()
         return html.Div("⏳ Recalculating... Please wait", style={"textAlign": "center", "padding": "20px", "fontSize": "16px", "color": "#666"})
     
-    # --- PERF: Start Timing ---
-    import time
-    t_start = time.time()
-    print(f"[PERF] >>> START Page {current_page} Render (Version {version})")
-
     # Get tasks from Golden Store
     t0 = time.time()
     if golden_task_store_data is not None and len(golden_task_store_data) > 0:
         tasks = golden_task_store_data
+        print(f"[TRACE] ✓ Loaded {len(tasks)} tasks from golden store")
     else:
         with tm.lock:
             tasks = list(tm.tasks.values())
-    print(f"[PERF] Step 1 (Get Data): {time.time() - t0:.4f}s | Total Tasks: {len(tasks)}")
+        print(f"[TRACE] ✓ Loaded {len(tasks)} tasks from task_manager")
+    timer.check(f"Step 1: Get Data ({len(tasks)} tasks)")
     
     if not tasks:
-        print("[PERF] No tasks found")
+        print("[TRACE] ✗ No tasks found")
+        timer.end()
         return "No tasks."
     
-    # ⚡ CRITICAL CACHE CHECK
-    t1 = time.time()
+    # CRITICAL CACHE CHECK
     current_golden_version = golden_store_version
+    print(f"[TRACE] Version check: cached={_cached_golden_version}, current={current_golden_version}")
     
     # Invalidate cache if data changed
     if _cached_golden_version != current_golden_version:
-        print(f"[PERF] Cache invalidated: {_cached_golden_version} -> {current_golden_version}")
+        print(f"[TRACE] 🔄 Cache invalidated: {_cached_golden_version} -> {current_golden_version}")
         _page_html_cache.clear()
         _cached_golden_version = current_golden_version
+        timer.check("Cache Invalidated")
     
     # Return cached page if available (INSTANT - no HTML generation)
     if current_page in _page_html_cache:
-        print(f"[PERF] CACHE HIT! Returning cached page in {time.time() - t_start:.4f}s")
+        print(f"[TRACE] ⚡ CACHE HIT! Returning cached page {current_page}")
+        timer.check("Cache Hit").end()
         return _page_html_cache[current_page]
-    print(f"[PERF] Step 2 (Cache Check): {time.time() - t1:.4f}s | Cache Miss")
+    
+    print(f"[TRACE] ❌ CACHE MISS for page {current_page}. Will generate rows.")
+    timer.check("Cache Miss Confirmed")
     
     force_refresh = version is not None and version > 0
     
     # Pagination Slicing
-    t2 = time.time()
     PAGE_SIZE = 300
     total_pages = max(1, (len(tasks) + PAGE_SIZE - 1) // PAGE_SIZE)
     current_page = max(0, min(current_page or 0, total_pages - 1))
     start_idx = current_page * PAGE_SIZE
     end_idx = start_idx + PAGE_SIZE
     visible_tasks = tasks[start_idx:end_idx]
-    print(f"[PERF] Step 3 (Slice): {time.time() - t2:.4f}s | Range: {start_idx}-{end_idx} | Visible: {len(visible_tasks)}")
+    print(f"[TRACE] ✂️ Sliced tasks [{start_idx}:{end_idx}] → {len(visible_tasks)} visible")
+    timer.check(f"Step 2: Pagination Slice")
     
-    # Row Generation Loop (THE HEAVY PART)
-    t3 = time.time()
-    rows = []
+    # Detect if this is ONLY a page navigation (no data change)
+    prev_golden_version = getattr(update_task_table_only, '_last_golden_version', None)
+    is_page_only_nav = (triggered_id == "task-page-store") and (prev_golden_version is not None) and (current_golden_version == prev_golden_version)
+    print(f"[TRACE] Navigation detection: triggered={triggered_id}, prev_ver={prev_golden_version}, curr_ver={current_golden_version} → is_page_only_nav={is_page_only_nav}")
+    timer.check("Navigation Detection")
     
-    # 🔧 DEBUG: Log if we're about to generate rows (should only happen on cache miss)
-    print(f"[DEBUG] Starting row generation for {len(visible_tasks)} tasks... This should ONLY happen on first visit to a page!")
+    # Store current state for next comparison
+    update_task_table_only._last_golden_version = current_golden_version
+    update_task_table_only._last_page = current_page
     
     # Pre-calculate helper functions ONCE - OPTIMIZED with native datetime
     from datetime import datetime, timezone
@@ -4094,41 +4144,16 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
         except Exception:
             return "-"
     
-    t4 = time.time()
-    print(f"[PERF] Step 4 (Setup helpers): {time.time() - t4:.4f}s")
-    
-    # 🔧 PAGINATION LOGIC (MOVED UP - before row generation)
-    PAGE_SIZE = 300
-    total_pages = max(1, (len(tasks) + PAGE_SIZE - 1) // PAGE_SIZE)
-    current_page = max(0, min(current_page or 0, total_pages - 1))
-    start = current_page * PAGE_SIZE
-    end = start + PAGE_SIZE
-    
-    visible_tasks = tasks[start:end]
-    
-    # ⚡ PERFORMANCE: Detect if this is ONLY a page navigation (no data change)
-    # Get previous version BEFORE updating it
-    prev_golden_version = getattr(update_task_table_only, '_last_golden_version', None)
-    is_page_only_nav = (triggered_id == "task-page-store") and (prev_golden_version is not None) and (current_golden_version == prev_golden_version)
-    
-    # 🔧 DEBUG: Log navigation detection
-    print(f"[DEBUG] triggered_id={triggered_id}, prev_ver={prev_golden_version}, curr_ver={current_golden_version}, is_page_only_nav={is_page_only_nav}")
-    
-    # Store current state for next comparison
-    update_task_table_only._last_golden_version = current_golden_version
-    update_task_table_only._last_page = current_page
-    
-    # ⚡ CRITICAL CACHE CHECK #2 - Return cached page AFTER pagination calc but BEFORE row generation
-    if current_page in _page_html_cache:
-        print(f"[PERF] CACHE HIT #2! Returning cached page {current_page} in {time.time() - t_start:.4f}s")
-        return _page_html_cache[current_page]
-    else:
-        print(f"[DEBUG] CACHE MISS for page {current_page}. Will generate {len(visible_tasks)} rows. Cache has pages: {list(_page_html_cache.keys())}")
-    
-    rows = []
+    timer.check("Step 3: Helper Functions Setup")
     
     # Generate rows for visible tasks ONLY (300 max)
+    print(f"[TRACE] 🚀 Starting row generation for {len(visible_tasks)} tasks...")
+    rows = []
+    row_count = 0
+    t_row_start = time.time()
+    
     for t in visible_tasks:
+        row_count += 1
         # ⚡ OPTIMIZATION: Direct attribute access instead of getattr where possible
         direction_display = t.signal_direction if t.signal_direction else "-"
         # ⚡ CRITICAL OPTIMIZATION: Use fmt_time helper (native datetime) instead of pd.to_datetime
@@ -4297,7 +4322,18 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
             html.Td(log_display, style={"minWidth": "200px"}),
             html.Td(button_cell, style={"minWidth": "180px"})
         ]))
-
+        
+        # Log progress every 100 rows
+        if row_count % 100 == 0:
+            elapsed = time.time() - t_row_start
+            print(f"[TRACE]   └─ Generated {row_count}/{len(visible_tasks)} rows ({elapsed:.2f}s)")
+    
+    row_elapsed = time.time() - t_row_start
+    print(f"[TRACE] ✓ Generated {row_count} rows in {row_elapsed:.2f}s ({row_elapsed/row_count*1000:.1f}ms per row)")
+    timer.check(f"Step 4: Row Generation ({row_count} rows)")
+    
+    # Build table HTML
+    t_table_start = time.time()
     table = html.Table([
         html.Thead(html.Tr([
             html.Th("ID", style={"minWidth": "80px"}),
@@ -4355,7 +4391,9 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
         ]), style={'position': 'sticky', 'top': 0, 'backgroundColor': '#f0f0f0', 'zIndex': 10}),
         html.Tbody(rows)
     ], style={"width": "100%", "borderCollapse": "collapse"})
-    
+    print(f"[TRACE] ✓ Built table HTML in {time.time() - t_table_start:.2f}s")
+    timer.check("Step 5: Build Table HTML")
+
     # ⚡ PERFORMANCE: Skip heavy stats calculation on page-only navigation
     # This is the CRITICAL FIX - stats are calculated ONLY when version changes (data reload/recalc)
     if is_page_only_nav:
@@ -4548,6 +4586,7 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
         nav_buttons.append(html.Button(str(p+1), id={"type":"page-nav","index":p}, style=btn_style))
     nav_buttons.append(html.Button("Next >>", id={"type":"page-nav","index":"next"}, disabled=(current_page==total_pages-1), style={"margin":"2px"}))
     nav_container = html.Div(nav_buttons, style={"display":"flex", "alignItems":"center", "marginBottom":"8px", "justifyContent":"center"})
+    timer.check("Step 7: Build Pagination Nav")
 
     result = html.Div([
         html.H4("Task Summary"),
@@ -4564,13 +4603,16 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
             style={"fontSize": "11px", "color": "#777", "marginTop": "6px", "marginBottom": "0", "fontStyle": "italic"}
         )
     ])
+    timer.check("Step 8: Build Final Result Div")
     
     # ⚡ CACHE THE RESULT for instant page switching (ALWAYS cache, regardless of stats)
     # The table HTML is the same whether we calculated full stats or page-only stats
     _page_html_cache[current_page] = result
+    timer.check("Step 9: Cache Result")
     
     # Print final timing
-    print(f"[PERF] <<< COMPLETE Page {current_page} rendered in {time.time() - t_start:.4f}s | Cache Size: {len(_page_html_cache)}")
+    timer.end()
+    print(f"[TRACE] <<< COMPLETE Page {current_page} rendered in {timer.last_time - timer.start_time:.4f}s | Cache Size: {len(_page_html_cache)}")
     
     return result
 
