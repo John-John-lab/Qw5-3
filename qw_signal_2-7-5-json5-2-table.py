@@ -4432,8 +4432,10 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
                                        style={"textAlign": "center", "padding": "10px", "color": "#666", "fontStyle": "italic"})
         stats_elapsed = 0.0
     else:
-        # Initialize timer before heavy calculation
+        # 🔧 CRITICAL: Calculate signal stats on ALL tasks when data loads
+        print(f"[DEBUG] 🚀 CALCULATING SIGNAL STATS for {len(tasks)} tasks...")
         t_stats_start = time.time()
+        
         # ✅ BASIC STATS: Calculate only when data changes (not on page nav)
         total_tasks = len(tasks)
         completed_count = sum(1 for t in tasks if t.status == "completed")
