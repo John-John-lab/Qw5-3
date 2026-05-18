@@ -4426,11 +4426,14 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
         ]
         stats_table = html.Table([html.Tbody(stats_rows)], style={"border": "1px solid #ccc", "padding": "5px", "fontSize": "13px", "backgroundColor": "#f9f9f9"})
         
-        # 🔧 FIX: Always calculate signal stats when NOT page-only navigation
-        print(f"[DEBUG] 🎯 CALCULATING SIGNAL STATS: triggered={triggered_id}, is_page_nav={is_page_only_nav}")
-        t_stats_start = time.time()
+        # 🔧 FIX: Placeholder for signal stats during page navigation
+        print(f"[DEBUG] ⏭️ SKIPPING SIGNAL STATS (page navigation): triggered={triggered_id}")
+        signal_stats_table = html.Div("ℹ️ Detailed signal stats shown after data load/recalculation", 
+                                       style={"textAlign": "center", "padding": "10px", "color": "#666", "fontStyle": "italic"})
         stats_elapsed = 0.0
     else:
+        # Initialize timer before heavy calculation
+        t_stats_start = time.time()
         # ✅ BASIC STATS: Calculate only when data changes (not on page nav)
         total_tasks = len(tasks)
         completed_count = sum(1 for t in tasks if t.status == "completed")
