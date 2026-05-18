@@ -4066,13 +4066,16 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
         _cached_golden_version = current_golden_version
         timer.check("Cache Invalidated")
     
-    # Return cached page if available (INSTANT - no HTML generation)
-    if current_page in _page_html_cache:
-        print(f"[TRACE] ⚡ CACHE HIT! Returning cached page {current_page}")
-        timer.check("Cache Hit").end()
-        return _page_html_cache[current_page]
+    # ⚡ CRITICAL FIX: Cache MUST use version in key to avoid stale data
+    cache_key = f"page_{current_page}_v{current_golden_version}"
     
-    print(f"[TRACE] ❌ CACHE MISS for page {current_page}. Will generate rows.")
+    # Return cached page if available (INSTANT - no HTML generation)
+    if cache_key in _page_html_cache:
+        print(f"[TRACE] ⚡ CACHE HIT for key '{cache_key}'! Returning cached page {current_page}")
+        timer.check("Cache Hit").end()
+        return _page_html_cache[cache_key]
+    
+    print(f"[TRACE] ❌ CACHE MISS for key '{cache_key}'. Will generate rows.")
     timer.check("Cache Miss Confirmed")
     
     force_refresh = version is not None and version > 0
@@ -4090,6 +4093,13 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
     # Detect if this is ONLY a page navigation (no data change)
     prev_golden_version = getattr(update_task_table_only, '_last_golden_version', None)
     is_page_only_nav = (triggered_id == "task-page-store") and (prev_golden_version is not None) and (current_golden_version == prev_golden_version)
+    
+    # 🔧 CRITICAL FIX: Also treat analysis_trigger as a data change (not page nav)
+    # This ensures full stats are calculated after recalculation completes
+    if triggered_id == "analysis-complete-trigger":
+        is_page_only_nav = False
+        print(f"[TRACE] 🔄 Analysis trigger detected - forcing full stats recalculation")
+    
     print(f"[TRACE] Navigation detection: triggered={triggered_id}, prev_ver={prev_golden_version}, curr_ver={current_golden_version} → is_page_only_nav={is_page_only_nav}")
     timer.check("Navigation Detection")
     
@@ -4605,9 +4615,9 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
     ])
     timer.check("Step 8: Build Final Result Div")
     
-    # ⚡ CACHE THE RESULT for instant page switching (ALWAYS cache, regardless of stats)
+    # ⚡ CACHE THE RESULT with version key for instant page switching (ALWAYS cache, regardless of stats)
     # The table HTML is the same whether we calculated full stats or page-only stats
-    _page_html_cache[current_page] = result
+    _page_html_cache[cache_key] = result
     timer.check("Step 9: Cache Result")
     
     # Print final timing
