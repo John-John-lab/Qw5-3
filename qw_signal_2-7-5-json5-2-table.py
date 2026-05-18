@@ -4500,9 +4500,9 @@ def update_task_table_only(current_page, version, lock_state):
         )
     ])
     
-    # ⚡ CACHE THE RESULT for instant page switching (ONLY when full stats are calculated)
-    if not is_page_only_nav:
-        _page_html_cache[current_page] = result
+    # ⚡ CACHE THE RESULT for instant page switching (ALWAYS cache, regardless of stats)
+    # The table HTML is the same whether we calculated full stats or page-only stats
+    _page_html_cache[current_page] = result
     
     return result
 
