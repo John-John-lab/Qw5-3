@@ -2562,12 +2562,17 @@ function applyHiddenColumns() {
     });
 }
 // Set up a MutationObserver to reapply hidden columns after table updates
-const summaryDiv = document.getElementById('task-summary');
+const summaryDiv = document.getElementById('task-table-container');  // ✅ FIXED: Correct container ID
 if (summaryDiv) {
-    const observer = new MutationObserver(function() {
-        applyHiddenColumns();
+    let debounceTimer;
+    const observer = new MutationObserver(function(mutations) {
+        // ⚡ DEBOUNCE: Only run once per batch of DOM changes (prevents infinite loops)
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+            applyHiddenColumns();
+        }, 50);  // 50ms debounce - fast enough for UX, slow enough to batch updates
     });
-    observer.observe(summaryDiv, { childList: true, subtree: true });
+    observer.observe(summaryDiv, { childList: true, subtree: false });  // ✅ OPTIMIZED: No subtree observation
 }
 // Existing button feedback (unchanged) - now supports both BUTTON and DIV elements
 document.addEventListener('click', function(e) {
@@ -3994,29 +3999,55 @@ def update_task_table_only(current_page, version, lock_state):
     if lock_state and lock_state.get("locked", False):
         return html.Div("⏳ Recalculating... Please wait", style={"textAlign": "center", "padding": "20px", "fontSize": "16px", "color": "#666"})
     
+    # --- PERF: Start Timing ---
+    import time
+    t_start = time.time()
+    print(f"[PERF] >>> START Page {current_page} Render (Version {version})")
+
     # Get tasks from Golden Store
+    t0 = time.time()
     if golden_task_store_data is not None and len(golden_task_store_data) > 0:
         tasks = golden_task_store_data
     else:
         with tm.lock:
             tasks = list(tm.tasks.values())
-        
+    print(f"[PERF] Step 1 (Get Data): {time.time() - t0:.4f}s | Total Tasks: {len(tasks)}")
+    
     if not tasks:
+        print("[PERF] No tasks found")
         return "No tasks."
     
     # ⚡ CRITICAL CACHE CHECK
+    t1 = time.time()
     current_golden_version = golden_store_version
     
     # Invalidate cache if data changed
     if _cached_golden_version != current_golden_version:
+        print(f"[PERF] Cache invalidated: {_cached_golden_version} -> {current_golden_version}")
         _page_html_cache.clear()
         _cached_golden_version = current_golden_version
     
     # Return cached page if available (INSTANT - no HTML generation)
     if current_page in _page_html_cache:
+        print(f"[PERF] CACHE HIT! Returning cached page in {time.time() - t_start:.4f}s")
         return _page_html_cache[current_page]
+    print(f"[PERF] Step 2 (Cache Check): {time.time() - t1:.4f}s | Cache Miss")
     
     force_refresh = version is not None and version > 0
+    
+    # Pagination Slicing
+    t2 = time.time()
+    PAGE_SIZE = 300
+    total_pages = max(1, (len(tasks) + PAGE_SIZE - 1) // PAGE_SIZE)
+    current_page = max(0, min(current_page or 0, total_pages - 1))
+    start_idx = current_page * PAGE_SIZE
+    end_idx = start_idx + PAGE_SIZE
+    visible_tasks = tasks[start_idx:end_idx]
+    print(f"[PERF] Step 3 (Slice): {time.time() - t2:.4f}s | Range: {start_idx}-{end_idx} | Visible: {len(visible_tasks)}")
+    
+    # Row Generation Loop (THE HEAVY PART)
+    t3 = time.time()
+    rows = []
     
     # Pre-calculate helper functions ONCE - OPTIMIZED with native datetime
     from datetime import datetime, timezone
@@ -4049,15 +4080,26 @@ def update_task_table_only(current_page, version, lock_state):
             # Numeric timestamp (milliseconds)
             if isinstance(ts, (int, float)):
                 return datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+        except Exception:
             return "-"
+        # Fallback to pandas (slow path - should rarely happen)
+        try:
+            return pd.to_datetime(ts).strftime("%Y-%m-%d %H:%M")
         except Exception:
             return "-"
     
     def fmt_dd(val):
-        if val is None or (isinstance(val, float) and pd.isna(val)): return "-"
-        return f"{val:.2f}%"
-
-    # 🔧 PAGINATION LOGIC
+        if val is None: return "-"
+        if isinstance(val, (float, np.floating)) and pd.isna(val): return "-"
+        try:
+            return f"{float(val):.2f}%"
+        except Exception:
+            return "-"
+    
+    t4 = time.time()
+    print(f"[PERF] Step 4 (Setup helpers): {time.time() - t4:.4f}s")
+    
+    # 🔧 PAGINATION LOGIC (MOVED UP - before row generation)
     PAGE_SIZE = 300
     total_pages = max(1, (len(tasks) + PAGE_SIZE - 1) // PAGE_SIZE)
     current_page = max(0, min(current_page or 0, total_pages - 1))
@@ -4075,9 +4117,14 @@ def update_task_table_only(current_page, version, lock_state):
     update_task_table_only._last_golden_version = current_golden_version
     update_task_table_only._last_page = current_page
     
+    # ⚡ CRITICAL CACHE CHECK #2 - Return cached page AFTER pagination calc but BEFORE row generation
+    if current_page in _page_html_cache:
+        print(f"[PERF] CACHE HIT #2! Returning cached page in {time.time() - t_start:.4f}s")
+        return _page_html_cache[current_page]
+    
     rows = []
     
-    # ⚡ PERFORMANCE: Cache attribute access to avoid repeated getattr()
+    # Generate rows for visible tasks ONLY (300 max)
     for t in visible_tasks:
         # ⚡ OPTIMIZATION: Direct attribute access instead of getattr where possible
         direction_display = t.signal_direction if t.signal_direction else "-"
@@ -4518,6 +4565,9 @@ def update_task_table_only(current_page, version, lock_state):
     # ⚡ CACHE THE RESULT for instant page switching (ALWAYS cache, regardless of stats)
     # The table HTML is the same whether we calculated full stats or page-only stats
     _page_html_cache[current_page] = result
+    
+    # Print final timing
+    print(f"[PERF] <<< COMPLETE Page {current_page} rendered in {time.time() - t_start:.4f}s | Cache Size: {len(_page_html_cache)}")
     
     return result
 
