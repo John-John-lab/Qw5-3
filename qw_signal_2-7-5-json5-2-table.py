@@ -3957,6 +3957,12 @@ def update_summary_stats_only(version, lock_state):
 # ============================================================================
 # 🔧 SPLIT CALLBACK #2: Task Table Only (LIGHT - runs on every page click)
 # ============================================================================
+
+# ⚡ CRITICAL OPTIMIZATION: Page-level HTML cache
+# Stores pre-rendered HTML rows for each page to avoid re-rendering on navigation
+_page_html_cache = {}
+_cached_golden_version = None
+
 @app.callback(
     Output("task-table-container", "children"),
     Input("task-page-store", "data"),
@@ -3964,8 +3970,8 @@ def update_summary_stats_only(version, lock_state):
     Input("recalc-lock-store", "data")
 )
 def update_task_table_only(current_page, version, lock_state):
-    """Render task table ONLY. Optimized to skip stats calculation on page changes."""
-    global golden_task_store_data, golden_store_version
+    """Render task table ONLY. Uses aggressive caching to skip HTML generation on page changes."""
+    global golden_task_store_data, golden_store_version, _page_html_cache, _cached_golden_version
     
     # Validate global state
     if not hasattr(app, 'layout') or app.layout is None:
@@ -3998,17 +4004,23 @@ def update_task_table_only(current_page, version, lock_state):
     if not tasks:
         return "No tasks."
     
-    # Cache check - CRITICAL OPTIMIZATION
+    # ⚡ CRITICAL CACHE CHECK
     current_golden_version = golden_store_version
-    prev_golden_version = getattr(update_task_table_only, "_last_golden_version", None)
-    prev_page = getattr(update_task_table_only, "_last_page", None)
+    
+    # Invalidate cache if data changed
+    if _cached_golden_version != current_golden_version:
+        _page_html_cache.clear()
+        _cached_golden_version = current_golden_version
+    
+    # Return cached page if available (INSTANT - no HTML generation)
+    if current_page in _page_html_cache:
+        return _page_html_cache[current_page]
     
     force_refresh = version is not None and version > 0
     
-    # Skip if same page + same version (prevents unnecessary re-renders)
-    if not force_refresh and current_golden_version == prev_golden_version and current_page == prev_page:
-        return no_update
-        
+    # Get previous version for comparison
+    prev_golden_version = getattr(update_task_table_only, '_last_golden_version', None)
+    
     update_task_table_only._last_golden_version = current_golden_version
     update_task_table_only._last_page = current_page
 
@@ -4300,7 +4312,8 @@ def update_task_table_only(current_page, version, lock_state):
             html.Tr([html.Td("📉 Avg Drawdown Lvl (Page)"), html.Td(fmt_dd(avg_dd))])
         ]
         stats_table = html.Table([html.Tbody(stats_rows)], style={"border": "1px solid #ccc", "padding": "5px", "fontSize": "13px", "backgroundColor": "#f9f9f9"})
-        signal_stats_table = html.Div("", style={"display": "none"})
+        # Show empty placeholder for signal stats during page nav (will be filled on next data change)
+        signal_stats_table = html.Div("ℹ️ Detailed signal stats shown after data load/recalculation", style={"textAlign": "center", "padding": "10px", "color": "#666", "fontStyle": "italic"})
     else:
         # ✅ BASIC STATS: Calculate only when data changes (not on page nav)
         total_tasks = len(tasks)
@@ -4473,7 +4486,7 @@ def update_task_table_only(current_page, version, lock_state):
     nav_buttons.append(html.Button("Next >>", id={"type":"page-nav","index":"next"}, disabled=(current_page==total_pages-1), style={"margin":"2px"}))
     nav_container = html.Div(nav_buttons, style={"display":"flex", "alignItems":"center", "marginBottom":"8px", "justifyContent":"center"})
 
-    return html.Div([
+    result = html.Div([
         html.H4("Task Summary"),
         nav_container,
         html.Div(table, style={"overflow-x": "auto", "overflow-y": "auto", "max-height": "75vh", "width": "100%"}),
@@ -4488,6 +4501,11 @@ def update_task_table_only(current_page, version, lock_state):
             style={"fontSize": "11px", "color": "#777", "marginTop": "6px", "marginBottom": "0", "fontStyle": "italic"}
         )
     ])
+    
+    # ⚡ CACHE THE RESULT for instant page switching
+    _page_html_cache[current_page] = result
+    
+    return result
 
 @app.callback(
     Output("task-page-store", "data"),
