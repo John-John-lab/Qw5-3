@@ -4410,19 +4410,19 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
     # This is the CRITICAL FIX - stats are calculated ONLY when version changes (data reload/recalc)
     if is_page_only_nav:
         # Return minimal stats for page navigation (no heavy iteration over all tasks)
-        # But we still need to show basic stats from visible rows (fast, only 300 items)
+        # But we still need to show basic stats from ALL tasks (consistent across pages)
         total_tasks = len(tasks)
-        completed_count = sum(1 for t in visible_tasks if t.status == "completed")
+        completed_count = sum(1 for t in tasks if t.status == "completed")
         
-        # Page-specific averages (FAST - only 300 visible rows)
-        avg_adv = np.mean([t.max_adverse_move_pct for t in visible_tasks if t.max_adverse_move_pct is not None and not pd.isna(t.max_adverse_move_pct)] or [0])
-        avg_dd = np.mean([t.drawdown_before_level for t in visible_tasks if t.drawdown_before_level is not None and not pd.isna(t.drawdown_before_level)] or [0])
+        # ALL-task averages (still fast - just iterating, not generating HTML)
+        avg_adv = np.mean([t.max_adverse_move_pct for t in tasks if t.max_adverse_move_pct is not None and not pd.isna(t.max_adverse_move_pct)] or [0])
+        avg_dd = np.mean([t.drawdown_before_level for t in tasks if t.drawdown_before_level is not None and not pd.isna(t.drawdown_before_level)] or [0])
         
         stats_rows = [
-            html.Tr([html.Td("✅ Task Completed (Page)"), html.Td(str(completed_count))]),
+            html.Tr([html.Td("✅ Task Completed (Total)"), html.Td(str(completed_count))]),
             html.Tr([html.Td("📦 Total Tasks"), html.Td(str(total_tasks))]),
-            html.Tr([html.Td("📉 Avg Max Adverse (Page)"), html.Td(fmt_dd(avg_adv))]),
-            html.Tr([html.Td("📉 Avg Drawdown Lvl (Page)"), html.Td(fmt_dd(avg_dd))])
+            html.Tr([html.Td("📉 Avg Max Adverse (All)"), html.Td(fmt_dd(avg_adv))]),
+            html.Tr([html.Td("📉 Avg Drawdown Lvl (All)"), html.Td(fmt_dd(avg_dd))])
         ]
         stats_table = html.Table([html.Tbody(stats_rows)], style={"border": "1px solid #ccc", "padding": "5px", "fontSize": "13px", "backgroundColor": "#f9f9f9"})
         
@@ -4436,19 +4436,19 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
         print(f"[DEBUG] 🚀 CALCULATING SIGNAL STATS for {len(tasks)} tasks...")
         t_stats_start = time.time()
         
-        # ✅ BASIC STATS: Calculate only when data changes (not on page nav)
+        # ✅ BASIC STATS: Calculate only when data changes (not on page nav) - NOW USES ALL TASKS
         total_tasks = len(tasks)
         completed_count = sum(1 for t in tasks if t.status == "completed")
         
-        # Page-specific averages (calculated only on visible rows)
-        avg_adv = np.mean([t.max_adverse_move_pct for t in visible_tasks if t.max_adverse_move_pct is not None and not pd.isna(t.max_adverse_move_pct)] or [0])
-        avg_dd = np.mean([t.drawdown_before_level for t in visible_tasks if t.drawdown_before_level is not None and not pd.isna(t.drawdown_before_level)] or [0])
+        # ALL-task averages (consistent across all pages)
+        avg_adv = np.mean([t.max_adverse_move_pct for t in tasks if t.max_adverse_move_pct is not None and not pd.isna(t.max_adverse_move_pct)] or [0])
+        avg_dd = np.mean([t.drawdown_before_level for t in tasks if t.drawdown_before_level is not None and not pd.isna(t.drawdown_before_level)] or [0])
         
         stats_rows = [
-            html.Tr([html.Td("✅ Task Completed 100%"), html.Td(str(completed_count))]),
-            html.Tr([html.Td("📦 Total Task"), html.Td(str(total_tasks))]),
-            html.Tr([html.Td("📉 Avg Max Adverse (Page)"), html.Td(fmt_dd(avg_adv))]),
-            html.Tr([html.Td("📉 Avg Drawdown Lvl (Page)"), html.Td(fmt_dd(avg_dd))])
+            html.Tr([html.Td("✅ Task Completed (Total)"), html.Td(str(completed_count))]),
+            html.Tr([html.Td("📦 Total Tasks"), html.Td(str(total_tasks))]),
+            html.Tr([html.Td("📉 Avg Max Adverse (All)"), html.Td(fmt_dd(avg_adv))]),
+            html.Tr([html.Td("📉 Avg Drawdown Lvl (All)"), html.Td(fmt_dd(avg_dd))])
         ]
         stats_table = html.Table([html.Tbody(stats_rows)], style={"border": "1px solid #ccc", "padding": "5px", "fontSize": "13px", "backgroundColor": "#f9f9f9"})
         
